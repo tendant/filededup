@@ -20,7 +20,8 @@ type FileRecord struct {
 	Hash      string    `json:"hash"`
 }
 
-func uploadFilesHandler(q *recorddb.Queries) http.HandlerFunc {
+// UploadFilesHandler handles HTTP requests to upload file records
+func UploadFilesHandler(q *recorddb.Queries) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var reader io.Reader = r.Body
 		if r.Header.Get("Content-Encoding") == "gzip" {
@@ -54,7 +55,8 @@ func uploadFilesHandler(q *recorddb.Queries) http.HandlerFunc {
 	}
 }
 
-func findDuplicatesHandler(q *recorddb.Queries) http.HandlerFunc {
+// FindDuplicatesHandler handles HTTP requests to find duplicate files
+func FindDuplicatesHandler(q *recorddb.Queries) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		dupes, err := q.FindDuplicateFiles(r.Context())
 		if err != nil {
