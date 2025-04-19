@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -27,26 +29,29 @@ type FileRecord struct {
 }
 
 type Agent struct {
-	RootDir   string
-	ServerURL string
-	MachineID string
-	BatchSize int
+	RootDir    string
+	ServerURL  string
+	MachineID  string
+	BatchSize  int
+	NumWorkers int // Number of parallel workers
 }
 
 func New(root, server, machineID string, batch int) *Agent {
+	// Default to number of CPUs for worker count
+	numWorkers := runtime.NumCPU()
+	
 	return &Agent{
-		RootDir:   root,
-		ServerURL: strings.TrimRight(server, "/"),
-		MachineID: machineID,
-		BatchSize: batch,
+		RootDir:    root,
+		ServerURL:  strings.TrimRight(server, "/"),
+		MachineID:  machineID,
+		BatchSize:  batch,
+		NumWorkers: numWorkers,
 	}
 }
 
 func (a *Agent) Run() error {
-	var batch []FileRecord
-	
 	// Initialize progress tracking
-	var processedFiles, totalFiles, totalBytes atomic.Int64
+	var processedFiles, totalFiles, totalBytes, queuedFiles atomic.Int64
 	var startTime = time.Now()
 	
 	// First, count total files to process
@@ -58,10 +63,13 @@ func (a *Agent) Run() error {
 		}
 		return nil
 	})
-	slog.Info("Starting file scan", "totalFiles", totalFiles.Load(), "totalBytes", formatBytes(totalBytes.Load()))
+	slog.Info("Starting file scan", 
+		"totalFiles", totalFiles.Load(), 
+		"totalBytes", formatBytes(totalBytes.Load()),
+		"workers", a.NumWorkers)
 	
 	// Start progress reporting in a separate goroutine
-	done := make(chan struct{})
+	progressDone := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
@@ -71,6 +79,7 @@ func (a *Agent) Run() error {
 			case <-ticker.C:
 				processed := processedFiles.Load()
 				total := totalFiles.Load()
+				queued := queuedFiles.Load()
 				if total > 0 {
 					progress := float64(processed) / float64(total) * 100
 					elapsed := time.Since(startTime)
@@ -80,70 +89,140 @@ func (a *Agent) Run() error {
 					}
 					slog.Info("Scan progress", 
 						"processed", processed,
+						"queued", queued,
 						"total", total,
 						"percent", fmt.Sprintf("%.1f%%", progress),
 						"elapsed", elapsed.Round(time.Second),
 						"eta", eta.Round(time.Second))
 				}
-			case <-done:
+			case <-progressDone:
 				return
 			}
 		}
 	}()
 
-	// Process files
+	// Create channels for the worker pool
+	fileQueue := make(chan string, 1000) // Buffer to avoid blocking
+	resultQueue := make(chan FileRecord, 1000)
+	batchQueue := make(chan []FileRecord, 10)
+	
+	// Create a WaitGroup to wait for all workers to finish
+	var wg sync.WaitGroup
+	
+	// Start file processing workers
+	slog.Info("Starting file processing workers", "count", a.NumWorkers)
+	for i := 0; i < a.NumWorkers; i++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for path := range fileQueue {
+				// Process the file
+				info, err := os.Stat(path)
+				if err != nil || info.IsDir() {
+					processedFiles.Add(1)
+					continue
+				}
+				
+				// Hash the file
+				hash, err := hashFile(path)
+				if err != nil {
+					processedFiles.Add(1)
+					continue
+				}
+				
+				// Get the absolute directory path
+				dirPath := filepath.Dir(path)
+				absPath, err := filepath.Abs(dirPath)
+				if err != nil {
+					slog.Error("Failed to get absolute path", "path", dirPath, "error", err)
+					absPath = dirPath // Fallback to the original path
+				}
+				filename := filepath.Base(path)
+				
+				// Create a file record and send it to the result queue
+				resultQueue <- FileRecord{
+					MachineID: a.MachineID,
+					Path:      absPath,
+					Filename:  filename,
+					Size:      info.Size(),
+					MTime:     info.ModTime(),
+					Hash:      hash,
+				}
+				
+				// Update progress
+				processedFiles.Add(1)
+			}
+		}(i)
+	}
+	
+	// Start batch processing worker
+	batchDone := make(chan struct{})
+	go func() {
+		defer close(batchDone)
+		for batch := range batchQueue {
+			if err := a.sendBatch(batch); err != nil {
+				slog.Error("Failed to send batch", "error", err)
+			}
+		}
+	}()
+	
+	// Start result collector
+	resultDone := make(chan struct{})
+	go func() {
+		defer close(resultDone)
+		batch := make([]FileRecord, 0, a.BatchSize)
+		
+		for record := range resultQueue {
+			batch = append(batch, record)
+			
+			if len(batch) >= a.BatchSize {
+				batchQueue <- batch
+				batch = make([]FileRecord, 0, a.BatchSize)
+			}
+		}
+		
+		// Send any remaining records
+		if len(batch) > 0 {
+			batchQueue <- batch
+		}
+	}()
+	
+	// Walk the directory and queue files
 	err := filepath.Walk(a.RootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
 		
-		// Update progress counter
-		processedFiles.Add(1)
-
-		hash, err := hashFile(path)
-		if err != nil {
-			return nil
-		}
-
-		// Get the absolute directory path
-		dirPath := filepath.Dir(path)
-		absPath, err := filepath.Abs(dirPath)
-		if err != nil {
-			slog.Error("Failed to get absolute path", "path", dirPath, "error", err)
-			absPath = dirPath // Fallback to the original path
-		}
-		filename := filepath.Base(path)
-
-		batch = append(batch, FileRecord{
-			MachineID: a.MachineID,
-			Path:      absPath,
-			Filename:  filename,
-			Size:      info.Size(),
-			MTime:     info.ModTime(),
-			Hash:      hash,
-		})
-
-		if len(batch) >= a.BatchSize {
-			if err := a.sendBatch(batch); err != nil {
-				return err
-			}
-			batch = nil
-		}
+		// Queue the file for processing
+		fileQueue <- path
+		queuedFiles.Add(1)
+		
 		return nil
 	})
 
+	// Close the file queue to signal workers to finish
+	close(fileQueue)
+	
+	// Wait for all file processing workers to finish
+	wg.Wait()
+	
+	// Close the result queue to signal the result collector to finish
+	close(resultQueue)
+	
+	// Wait for the result collector to finish
+	<-resultDone
+	
+	// Close the batch queue to signal the batch processor to finish
+	close(batchQueue)
+	
+	// Wait for the batch processor to finish
+	<-batchDone
+	
 	// Signal the progress goroutine to stop
-	close(done)
+	close(progressDone)
 	
 	if err != nil {
 		return fmt.Errorf("walk error: %w", err)
-	}
-	
-	if len(batch) > 0 {
-		err := a.sendBatch(batch)
-		if err != nil {
-			return err
-		}
 	}
 	
 	// Print final summary
@@ -152,7 +231,8 @@ func (a *Agent) Run() error {
 		"totalFiles", processedFiles.Load(),
 		"totalBytes", formatBytes(totalBytes.Load()),
 		"duration", elapsed.Round(time.Second),
-		"filesPerSecond", float64(processedFiles.Load())/elapsed.Seconds())
+		"filesPerSecond", float64(processedFiles.Load())/elapsed.Seconds(),
+		"workers", a.NumWorkers)
 	
 	return nil
 }
