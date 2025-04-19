@@ -11,6 +11,39 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const findDuplicateFiles = `-- name: FindDuplicateFiles :many
+SELECT hash, COUNT(*) AS duplicate_count, array_agg(path ORDER BY path) AS paths
+FROM files
+GROUP BY hash
+HAVING COUNT(*) > 1
+`
+
+type FindDuplicateFilesRow struct {
+	Hash           string
+	DuplicateCount int64
+	Paths          interface{}
+}
+
+func (q *Queries) FindDuplicateFiles(ctx context.Context) ([]FindDuplicateFilesRow, error) {
+	rows, err := q.db.Query(ctx, findDuplicateFiles)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FindDuplicateFilesRow
+	for rows.Next() {
+		var i FindDuplicateFilesRow
+		if err := rows.Scan(&i.Hash, &i.DuplicateCount, &i.Paths); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const upsertFile = `-- name: UpsertFile :exec
 INSERT INTO files (machine_id, path, filename, size, mtime, hash)
 VALUES ($1, $2, $3, $4, $5, $6)

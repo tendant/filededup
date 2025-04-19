@@ -6,7 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/tendant/filededup/db"
+	"github.com/tendant/filededup/pkg/record/recorddb"
 )
 
 func main() {
@@ -14,11 +14,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	dbQueries := db.New(dbConn)
+	dbQueries := recorddb.New(dbConn)
 
 	r := chi.NewRouter()
-	r.Post("/files", uploadFilesHandler(dbQueries))
-	r.Get("/duplicates", findDuplicatesHandler(dbQueries))
+	r.Post("/files", recorddb.uploadFilesHandler(dbQueries))
+	r.Get("/duplicates", recorddb.findDuplicatesHandler(dbQueries))
 
 	log.Println("Server running on :8080")
 	http.ListenAndServe(":8080", r)

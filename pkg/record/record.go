@@ -8,9 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"your_project/internal/db"
-
-	_ "github.com/lib/pq"
+	"github.com/tendant/filededup/pkg/record/recorddb"
 )
 
 type FileRecord struct {
@@ -22,7 +20,7 @@ type FileRecord struct {
 	Hash      string    `json:"hash"`
 }
 
-func uploadFilesHandler(q *db.Queries) http.HandlerFunc {
+func uploadFilesHandler(q *recorddb.Queries) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var reader io.Reader = r.Body
 		if r.Header.Get("Content-Encoding") == "gzip" {
@@ -42,7 +40,7 @@ func uploadFilesHandler(q *db.Queries) http.HandlerFunc {
 		}
 
 		for _, f := range files {
-			_ = q.UpsertFile(r.Context(), db.UpsertFileParams{
+			_ = q.UpsertFile(r.Context(), recorddb.UpsertFileParams{
 				MachineID: f.MachineID,
 				Path:      f.Path,
 				Filename:  f.Filename,
@@ -56,7 +54,7 @@ func uploadFilesHandler(q *db.Queries) http.HandlerFunc {
 	}
 }
 
-func findDuplicatesHandler(q *db.Queries) http.HandlerFunc {
+func findDuplicatesHandler(q *recorddb.Queries) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		dupes, err := q.FindDuplicateFiles(r.Context())
 		if err != nil {
