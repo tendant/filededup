@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/tendant/filededup/pkg/record/recorddb"
 )
 
@@ -41,12 +42,16 @@ func UploadFilesHandler(q *recorddb.Queries) http.HandlerFunc {
 		}
 
 		for _, f := range files {
+			var pgTime pgtype.Timestamp
+			pgTime.Time = f.MTime
+			pgTime.Valid = true
+
 			_ = q.UpsertFile(r.Context(), recorddb.UpsertFileParams{
 				MachineID: f.MachineID,
 				Path:      f.Path,
 				Filename:  f.Filename,
 				Size:      f.Size,
-				Mtime:     f.MTime,
+				Mtime:     pgTime,
 				Hash:      f.Hash,
 			})
 		}
