@@ -1,0 +1,10 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "./recorddb/query.sql"
+    schema: "./recorddb/schema.sql"
+    gen:
+      go:
+        package: "recorddb"
+        out: "recorddb"
+        sql_package: "pgx/v5"
