@@ -20,6 +20,5 @@ DATABASE_URL="$DATABASE_URL" go run ./cmd/server
 ```
 
 ```sh
-export DATABASE_URL="postgres://filededup:pwd@localhost:5432/filededup?sslmode=disable"
-DATABASE_URL="$DATABASE_URL" go run ./cmd/agent -dir "." -server "http://localhost:8080" -machine-id "my-machine"
+go run ./cmd/agent -dir "." -server "http://localhost:8080" -machine-id "my-machine"
 ```

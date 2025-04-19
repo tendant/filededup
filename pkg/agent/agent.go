@@ -54,12 +54,18 @@ func (a *Agent) Run() error {
 			return nil
 		}
 
-		relPath, _ := filepath.Rel(a.RootDir, filepath.Dir(path))
+		// Get the absolute directory path
+		dirPath := filepath.Dir(path)
+		absPath, err := filepath.Abs(dirPath)
+		if err != nil {
+			slog.Error("Failed to get absolute path", "path", dirPath, "error", err)
+			absPath = dirPath // Fallback to the original path
+		}
 		filename := filepath.Base(path)
 
 		batch = append(batch, FileRecord{
 			MachineID: a.MachineID,
-			Path:      relPath,
+			Path:      absPath,
 			Filename:  filename,
 			Size:      info.Size(),
 			MTime:     info.ModTime(),
