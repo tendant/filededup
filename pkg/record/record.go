@@ -5,7 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -64,16 +64,16 @@ func UploadFilesHandler(q *recorddb.Queries) http.HandlerFunc {
 // FindDuplicatesHandler handles HTTP requests to find duplicate files
 func FindDuplicatesHandler(q *recorddb.Queries) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Println("Handling request for /duplicates")
+		slog.Info("Handling request for duplicates")
 		
 		// First, check if we have any files in the database
 		count, err := q.CountFiles(r.Context())
 		if err != nil {
-			log.Printf("Error counting files: %v", err)
+			slog.Error("Error counting files", "error", err)
 			http.Error(w, "Failed to query database", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("Found %d files in database", count)
+		slog.Info("Files in database", "count", count)
 		
 		if count == 0 {
 			// No files, return empty array
@@ -83,14 +83,14 @@ func FindDuplicatesHandler(q *recorddb.Queries) http.HandlerFunc {
 		}
 		
 		// Query for duplicates
-		log.Println("Querying for duplicate files...")
+		slog.Info("Querying for duplicate files")
 		dupes, err := q.FindDuplicateFiles(r.Context())
 		if err != nil {
-			log.Printf("Error querying duplicates: %v", err)
+			slog.Error("Error querying duplicates", "error", err)
 			http.Error(w, "Failed to query duplicates", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("Found %d sets of duplicate files", len(dupes))
+		slog.Info("Found duplicate files", "sets", len(dupes))
 		
 		// Convert to a more JSON-friendly format
 		type DuplicateFile struct {
@@ -104,7 +104,7 @@ func FindDuplicatesHandler(q *recorddb.Queries) http.HandlerFunc {
 			// Convert the array_agg result to a string slice
 			paths, ok := d.Paths.([]interface{})
 			if !ok {
-				log.Printf("Warning: could not convert paths to []interface{}: %T", d.Paths)
+				slog.Warn("Could not convert paths", "type", d.Paths)
 				continue
 			}
 			
@@ -124,7 +124,7 @@ func FindDuplicatesHandler(q *recorddb.Queries) http.HandlerFunc {
 		
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(result); err != nil {
-			log.Printf("Error encoding JSON response: %v", err)
+			slog.Error("Error encoding JSON response", "error", err)
 			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		}
 	}

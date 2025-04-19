@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -13,36 +13,41 @@ import (
 )
 
 func main() {
-	// Set up logging
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	
+	// Set up structured logging
+	logHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+	slog.SetDefault(slog.New(logHandler))
+
 	// Get database connection string from environment variable or use default
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://filededup:pwd@localhost:5432/filededup?sslmode=disable&host=localhost"
 	}
-	
-	log.Printf("Connecting to database: %s", dbURL)
-	
+
+	slog.Info("Connecting to database", "url", dbURL)
+
 	// Connect using pgx
 	dbConn, err := pgxpool.New(context.Background(), dbURL)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("Failed to connect to database", "error", err)
+		os.Exit(1)
 	}
 	defer dbConn.Close()
-	
+
 	// Test database connection
 	if err := dbConn.Ping(context.Background()); err != nil {
-		log.Fatalf("Failed to ping database: %v", err)
+		slog.Error("Failed to ping database", "error", err)
+		os.Exit(1)
 	}
-	log.Println("Database connection successful")
-	
+	slog.Info("Database connection successful")
+
 	dbQueries := recorddb.New(dbConn)
 
 	r := chi.NewRouter()
 	r.Post("/files", record.UploadFilesHandler(dbQueries))
 	r.Get("/duplicates", record.FindDuplicatesHandler(dbQueries))
 
-	log.Println("Server running on :8080")
+	slog.Info("Server running", "port", 8080)
 	http.ListenAndServe(":8080", r)
 }
