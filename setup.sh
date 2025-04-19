@@ -18,7 +18,7 @@ fi
 
 # Set environment variables
 export FILEDEDUP_USER_PASSWORD=${FILEDEDUP_USER_PASSWORD:-pwd}
-export DATABASE_URL="postgres://postgres:${POSTGRES_PASSWORD:-postgres}@localhost:5432/postgres?sslmode=disable"
+export DATABASE_URL="postgres://postgres:${POSTGRES_PASSWORD:-pwd}@localhost:5432/postgres?sslmode=disable"
 
 echo -e "${BLUE}Setting up database...${NC}"
 echo "Using DATABASE_URL: $DATABASE_URL"
