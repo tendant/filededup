@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,12 +34,26 @@ type Agent struct {
 	ServerURL  string
 	MachineID  string
 	BatchSize  int
-	NumWorkers int // Number of parallel workers
+	NumWorkers int // Number of parallel workers for file processing
+	QueueSize  int // Size of the internal processing queues
 }
 
+// New creates a new Agent with the specified parameters
 func New(root, server, machineID string, batch int) *Agent {
 	// Default to number of CPUs for worker count
 	numWorkers := runtime.NumCPU()
+	
+	// For very large directories, we might want more workers than CPUs
+	// to better handle I/O-bound operations
+	if numWorkers < 4 {
+		numWorkers = 4 // Minimum 4 workers
+	}
+	
+	// Default queue size based on batch size
+	queueSize := batch * 2
+	if queueSize < 1000 {
+		queueSize = 1000 // Minimum queue size
+	}
 	
 	return &Agent{
 		RootDir:    root,
@@ -46,7 +61,24 @@ func New(root, server, machineID string, batch int) *Agent {
 		MachineID:  machineID,
 		BatchSize:  batch,
 		NumWorkers: numWorkers,
+		QueueSize:  queueSize,
 	}
+}
+
+// WithWorkers sets the number of parallel workers
+func (a *Agent) WithWorkers(workers int) *Agent {
+	if workers > 0 {
+		a.NumWorkers = workers
+	}
+	return a
+}
+
+// WithQueueSize sets the size of internal processing queues
+func (a *Agent) WithQueueSize(size int) *Agent {
+	if size > 0 {
+		a.QueueSize = size
+	}
+	return a
 }
 
 func (a *Agent) Run() error {
@@ -66,7 +98,9 @@ func (a *Agent) Run() error {
 	slog.Info("Starting file scan", 
 		"totalFiles", totalFiles.Load(), 
 		"totalBytes", formatBytes(totalBytes.Load()),
-		"workers", a.NumWorkers)
+		"workers", a.NumWorkers,
+		"queueSize", a.QueueSize,
+		"batchSize", a.BatchSize)
 	
 	// Start progress reporting in a separate goroutine
 	progressDone := make(chan struct{})
@@ -101,32 +135,50 @@ func (a *Agent) Run() error {
 		}
 	}()
 
-	// Create channels for the worker pool
-	fileQueue := make(chan string, 1000) // Buffer to avoid blocking
-	resultQueue := make(chan FileRecord, 1000)
-	batchQueue := make(chan []FileRecord, 10)
+	// Create channels for the worker pool with appropriate buffer sizes
+	fileQueue := make(chan string, a.QueueSize)
+	resultQueue := make(chan FileRecord, a.QueueSize)
+	batchQueue := make(chan []FileRecord, a.NumWorkers) // One batch per worker
 	
 	// Create a WaitGroup to wait for all workers to finish
 	var wg sync.WaitGroup
 	
-	// Start file processing workers
+	// Start file processing workers with adaptive behavior
 	slog.Info("Starting file processing workers", "count", a.NumWorkers)
+	
+	// Create a semaphore to limit concurrent file operations
+	// This helps prevent overwhelming the file system with too many open files
+	fileSemaphore := make(chan struct{}, a.NumWorkers*2)
+	
 	for i := 0; i < a.NumWorkers; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
 			for path := range fileQueue {
+				// Acquire semaphore before file operations
+				fileSemaphore <- struct{}{}
+				
 				// Process the file
 				info, err := os.Stat(path)
 				if err != nil || info.IsDir() {
 					processedFiles.Add(1)
+					<-fileSemaphore // Release semaphore
 					continue
 				}
 				
-				// Hash the file
-				hash, err := hashFile(path)
+				// Optimize for file size - use different strategies for small vs large files
+				var hash string
+				if info.Size() < 10*1024*1024 { // 10MB threshold
+					// For small files, hash the entire file
+					hash, err = hashFile(path)
+				} else {
+					// For large files, use a faster sampling approach
+					hash, err = hashLargeFile(path, info.Size())
+				}
+				
 				if err != nil {
 					processedFiles.Add(1)
+					<-fileSemaphore // Release semaphore
 					continue
 				}
 				
@@ -151,6 +203,9 @@ func (a *Agent) Run() error {
 				
 				// Update progress
 				processedFiles.Add(1)
+				
+				// Release semaphore after file operations
+				<-fileSemaphore
 			}
 		}(i)
 	}
@@ -227,11 +282,16 @@ func (a *Agent) Run() error {
 	
 	// Print final summary
 	elapsed := time.Since(startTime)
+	// Calculate performance metrics
+	filesPerSecond := float64(processedFiles.Load()) / elapsed.Seconds()
+	bytesPerSecond := float64(totalBytes.Load()) / elapsed.Seconds()
+	
 	slog.Info("Scan completed", 
 		"totalFiles", processedFiles.Load(),
 		"totalBytes", formatBytes(totalBytes.Load()),
 		"duration", elapsed.Round(time.Second),
-		"filesPerSecond", float64(processedFiles.Load())/elapsed.Seconds(),
+		"filesPerSecond", fmt.Sprintf("%.1f", filesPerSecond),
+		"throughput", formatBytes(int64(bytesPerSecond))+"/s",
 		"workers", a.NumWorkers)
 	
 	return nil
@@ -249,6 +309,146 @@ func formatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// hashLargeFile efficiently hashes large files by sampling portions of the file
+// rather than reading the entire file. This is much faster for large files
+// while still providing good uniqueness for deduplication purposes.
+func hashLargeFile(path string, size int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	
+	// Create a hash
+	h := sha256.New()
+	
+	// Always hash the first and last 1MB
+	headSize := int64(1024 * 1024) // 1MB
+	tailSize := int64(1024 * 1024) // 1MB
+	
+	// For files between 10MB and 100MB, sample 10% of the file
+	// For files larger than 100MB, sample at most 10MB
+	middleSize := int64(0)
+	if size > 100*1024*1024 { // > 100MB
+		middleSize = 10 * 1024 * 1024 // 10MB
+	} else if size > 10*1024*1024 { // > 10MB
+		middleSize = size / 10 // 10% of file
+	}
+	
+	// Read and hash the first chunk
+	buf := make([]byte, 64*1024) // 64KB buffer
+	remaining := headSize
+	for remaining > 0 {
+		n := remaining
+		if n > int64(len(buf)) {
+			n = int64(len(buf))
+		}
+		
+		read, err := io.ReadAtLeast(f, buf[:n], int(n))
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return "", err
+		}
+		if read == 0 {
+			break
+		}
+		
+		h.Write(buf[:read])
+		remaining -= int64(read)
+		
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			break
+		}
+	}
+	
+	// If we have a middle section to sample, read samples from the middle
+	if middleSize > 0 && size > headSize+tailSize {
+		// Calculate the middle section boundaries
+		middleStart := headSize
+		middleEnd := size - tailSize
+		middleRange := middleEnd - middleStart
+		
+		// Take samples throughout the middle section
+		numSamples := 10 // Number of samples to take
+		sampleSize := middleSize / int64(numSamples)
+		
+		for i := 0; i < numSamples; i++ {
+			// Calculate position for this sample
+			pos := middleStart + (middleRange * int64(i) / int64(numSamples))
+			
+			// Seek to the position
+			_, err := f.Seek(pos, 0)
+			if err != nil {
+				return "", err
+			}
+			
+			// Read a sample
+			remaining := sampleSize
+			for remaining > 0 {
+				n := remaining
+				if n > int64(len(buf)) {
+					n = int64(len(buf))
+				}
+				
+				read, err := io.ReadAtLeast(f, buf[:n], int(n))
+				if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+					return "", err
+				}
+				if read == 0 {
+					break
+				}
+				
+				h.Write(buf[:read])
+				remaining -= int64(read)
+				
+				if err == io.EOF || err == io.ErrUnexpectedEOF {
+					break
+				}
+			}
+		}
+	}
+	
+	// Read and hash the last chunk
+	if size > headSize && tailSize > 0 {
+		// Seek to the position for the tail section
+		_, err := f.Seek(-tailSize, 2) // Seek from end
+		if err != nil {
+			return "", err
+		}
+		
+		remaining := tailSize
+		for remaining > 0 {
+			n := remaining
+			if n > int64(len(buf)) {
+				n = int64(len(buf))
+			}
+			
+			read, err := io.ReadAtLeast(f, buf[:n], int(n))
+			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+				return "", err
+			}
+			if read == 0 {
+				break
+			}
+			
+			h.Write(buf[:read])
+			remaining -= int64(read)
+			
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
+		}
+	}
+	
+	// Include the file size in the hash calculation to ensure
+	// files with the same sampled content but different sizes
+	// get different hashes
+	sizeBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(sizeBuf, uint64(size))
+	h.Write(sizeBuf)
+	
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func hashFile(path string) (string, error) {
