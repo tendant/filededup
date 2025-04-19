@@ -11,8 +11,19 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countFiles = `-- name: CountFiles :one
+SELECT COUNT(*) FROM files
+`
+
+func (q *Queries) CountFiles(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countFiles)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const findDuplicateFiles = `-- name: FindDuplicateFiles :many
-SELECT hash, COUNT(*) AS duplicate_count, array_agg(path ORDER BY path) AS paths
+SELECT hash, COUNT(*) AS duplicate_count, array_agg(path || '/' || filename ORDER BY path, filename) AS paths
 FROM files
 GROUP BY hash
 HAVING COUNT(*) > 1

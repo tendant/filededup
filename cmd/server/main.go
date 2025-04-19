@@ -13,10 +13,13 @@ import (
 )
 
 func main() {
+	// Set up logging
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	
 	// Get database connection string from environment variable or use default
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://filededup:pwd@localhost:5432/filededup?sslmode=disable"
+		dbURL = "postgres://filededup:pwd@localhost:5432/filededup?sslmode=disable&host=localhost"
 	}
 	
 	log.Printf("Connecting to database: %s", dbURL)
@@ -27,6 +30,12 @@ func main() {
 		log.Fatal(err)
 	}
 	defer dbConn.Close()
+	
+	// Test database connection
+	if err := dbConn.Ping(context.Background()); err != nil {
+		log.Fatalf("Failed to ping database: %v", err)
+	}
+	log.Println("Database connection successful")
 	
 	dbQueries := recorddb.New(dbConn)
 

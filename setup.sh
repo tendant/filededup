@@ -33,7 +33,7 @@ export DATABASE_URL="postgres://filededup:${FILEDEDUP_USER_PASSWORD}@localhost:5
 
 # Initialize schema if not already done
 echo -e "${BLUE}Initializing database schema...${NC}"
-psql -d filededup -U filededup -f pkg/record/recorddb/schema.sql || {
+psql -h localhost -d filededup -U filededup -f pkg/record/recorddb/schema.sql || {
     echo -e "${RED}Failed to initialize schema. This is normal if tables already exist.${NC}"
 }
 
