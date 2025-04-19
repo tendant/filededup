@@ -30,12 +30,14 @@ type FileRecord struct {
 }
 
 type Agent struct {
-	RootDir    string
-	ServerURL  string
-	MachineID  string
-	BatchSize  int
-	NumWorkers int // Number of parallel workers for file processing
-	QueueSize  int // Size of the internal processing queues
+	RootDir     string
+	ServerURL   string
+	MachineID   string
+	BatchSize   int
+	NumWorkers  int  // Number of parallel workers for file processing
+	QueueSize   int  // Size of the internal processing queues
+	MaxFileSize int64 // Maximum file size to process (0 = no limit)
+	SkipLarge   bool // Whether to skip large files
 }
 
 // New creates a new Agent with the specified parameters
@@ -77,6 +79,16 @@ func (a *Agent) WithWorkers(workers int) *Agent {
 func (a *Agent) WithQueueSize(size int) *Agent {
 	if size > 0 {
 		a.QueueSize = size
+	}
+	return a
+}
+
+// WithMaxFileSize sets the maximum file size to process
+// Files larger than this will be skipped if SkipLarge is true
+func (a *Agent) WithMaxFileSize(maxSize int64) *Agent {
+	if maxSize > 0 {
+		a.MaxFileSize = maxSize
+		a.SkipLarge = true
 	}
 	return a
 }
@@ -161,6 +173,14 @@ func (a *Agent) Run() error {
 				// Process the file
 				info, err := os.Stat(path)
 				if err != nil || info.IsDir() {
+					processedFiles.Add(1)
+					<-fileSemaphore // Release semaphore
+					continue
+				}
+				
+				// Check file size limit if enabled
+				if a.SkipLarge && a.MaxFileSize > 0 && info.Size() > a.MaxFileSize {
+					slog.Debug("Skipping large file", "path", path, "size", formatBytes(info.Size()), "limit", formatBytes(a.MaxFileSize))
 					processedFiles.Add(1)
 					<-fileSemaphore // Release semaphore
 					continue
