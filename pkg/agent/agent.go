@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,11 +44,61 @@ func New(root, server, machineID string, batch int) *Agent {
 
 func (a *Agent) Run() error {
 	var batch []FileRecord
+	
+	// Initialize progress tracking
+	var processedFiles, totalFiles, totalBytes atomic.Int64
+	var startTime = time.Now()
+	
+	// First, count total files to process
+	slog.Info("Counting files to process...")
+	filepath.Walk(a.RootDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			totalFiles.Add(1)
+			totalBytes.Add(info.Size())
+		}
+		return nil
+	})
+	slog.Info("Starting file scan", "totalFiles", totalFiles.Load(), "totalBytes", formatBytes(totalBytes.Load()))
+	
+	// Start progress reporting in a separate goroutine
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				processed := processedFiles.Load()
+				total := totalFiles.Load()
+				if total > 0 {
+					progress := float64(processed) / float64(total) * 100
+					elapsed := time.Since(startTime)
+					var eta time.Duration
+					if processed > 0 {
+						eta = time.Duration(float64(elapsed) / float64(processed) * float64(total-processed))
+					}
+					slog.Info("Scan progress", 
+						"processed", processed,
+						"total", total,
+						"percent", fmt.Sprintf("%.1f%%", progress),
+						"elapsed", elapsed.Round(time.Second),
+						"eta", eta.Round(time.Second))
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
 
+	// Process files
 	err := filepath.Walk(a.RootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
+		
+		// Update progress counter
+		processedFiles.Add(1)
 
 		hash, err := hashFile(path)
 		if err != nil {
@@ -81,13 +132,43 @@ func (a *Agent) Run() error {
 		return nil
 	})
 
+	// Signal the progress goroutine to stop
+	close(done)
+	
 	if err != nil {
 		return fmt.Errorf("walk error: %w", err)
 	}
+	
 	if len(batch) > 0 {
-		return a.sendBatch(batch)
+		err := a.sendBatch(batch)
+		if err != nil {
+			return err
+		}
 	}
+	
+	// Print final summary
+	elapsed := time.Since(startTime)
+	slog.Info("Scan completed", 
+		"totalFiles", processedFiles.Load(),
+		"totalBytes", formatBytes(totalBytes.Load()),
+		"duration", elapsed.Round(time.Second),
+		"filesPerSecond", float64(processedFiles.Load())/elapsed.Seconds())
+	
 	return nil
+}
+
+// formatBytes converts bytes to a human-readable string (KB, MB, GB, etc.)
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func hashFile(path string) (string, error) {
