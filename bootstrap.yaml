@@ -24,3 +24,7 @@ databases:
         grants:
           - user: filededup
             privileges: [USAGE, CREATE]
+            table_privileges: [SELECT, INSERT, UPDATE, DELETE]
+            sequence_privileges: [USAGE, SELECT, UPDATE]
+            function_privileges: [EXECUTE]
+            default_privileges: [SELECT, INSERT, UPDATE, DELETE]
